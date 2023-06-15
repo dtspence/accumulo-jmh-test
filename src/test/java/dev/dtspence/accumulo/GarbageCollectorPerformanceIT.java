@@ -14,6 +14,8 @@ import org.apache.accumulo.minicluster.MemoryUnit;
 import org.apache.accumulo.minicluster.MiniAccumuloCluster;
 import org.apache.accumulo.minicluster.MiniAccumuloConfig;
 import org.apache.accumulo.minicluster.ServerType;
+import org.apache.accumulo.miniclusterImpl.MiniAccumuloClusterImpl;
+import org.apache.accumulo.miniclusterImpl.MiniAccumuloConfigImpl;
 import org.apache.accumulo.server.ServerContext;
 import org.apache.accumulo.server.ServerOpts;
 import org.apache.commons.io.FileUtils;
@@ -30,6 +32,7 @@ import org.openjdk.jmh.annotations.Mode;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
@@ -67,8 +70,8 @@ public class GarbageCollectorPerformanceIT {
         static File rootPath;
         static File clusterPath;
         static File rfilePath;
-        static MiniAccumuloConfig config;
-        static MiniAccumuloCluster cluster;
+        static MiniAccumuloConfigImpl config;
+        static MiniAccumuloClusterImpl cluster;
 
         AccumuloClient client;
         File accumuloPropertiesFile;
@@ -87,15 +90,22 @@ public class GarbageCollectorPerformanceIT {
             Files.createDirectories(rfilePath.toPath());
 
             //clusterPath = tempPath.toFile();
-            config = new MiniAccumuloConfig(clusterPath, ROOT_PASSWORD)
+            config = new MiniAccumuloConfigImpl(clusterPath, ROOT_PASSWORD)
                     .setNumTservers(3)
                     .setMemory(ServerType.TABLET_SERVER, 2, MemoryUnit.GIGABYTE);
-            cluster = new MiniAccumuloCluster(config);
+            cluster = new MiniAccumuloClusterImpl(config);
             cluster.start();
+
+            // disable mini-accumulo GC
+            cluster.getClusterControl().stop(ServerType.GARBAGE_COLLECTOR);
 
             client = cluster.createAccumuloClient("root", new PasswordToken(ROOT_PASSWORD));
 
-            client.instanceOperations().setProperty("table.file.max", "100000");
+            // set max files to be high
+            client.instanceOperations().setProperty("table.file.max", Integer.toString(RFILE_COUNT + 1));
+
+            // unsure if this is the best way to suspend compactions
+            client.instanceOperations().setProperty("tserver.compaction.major.service.default.planner.opts.maxOpen", "0");
 
             client.tableOperations().create("test");
 
@@ -109,7 +119,7 @@ public class GarbageCollectorPerformanceIT {
 
         void generateFilesAndImport() throws Exception {
             final var executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
-            final var paths = IntStream.range(0, RFILE_COUNT).mapToObj(x -> Paths.get(rfilePath.toString(), "rfile_" + x + ".rf")).collect(Collectors.toList());
+            final var paths = IntStream.range(1, RFILE_COUNT).mapToObj(x -> Paths.get(rfilePath.toString(), "rfile_" + x + ".rf")).collect(Collectors.toList());
 
             paths.forEach(p -> {
                 executor.submit(() -> {
@@ -128,17 +138,16 @@ public class GarbageCollectorPerformanceIT {
             log.info("importing");
             client.tableOperations().importDirectory(rfilePath.toString()).to("test").load();
         }
+
+        @TearDown(Level.Trial)
+        public void tearDown() throws Exception{
+            client.close();
+            cluster.stop();
+        }
     }
 
     @Benchmark
-    public void benchmarkCandidates(BenchmarkState state, Blackhole bh) throws Exception {
-        // TODO: currently the file counts being iterated over decrease and needs to be fixed
-        // it roughly starts at RFILE_COUNT but decreases as it's measuring:
-        // INFO dev.dtspence.accumulo.GarbageCollectorPerformanceIT - Iterated over: 9966
-        // ...
-        // INFO dev.dtspence.accumulo.GarbageCollectorPerformanceIT - Iterated over: 9075
-        // by end of iteration 3 ...
-        // INFO dev.dtspence.accumulo.GarbageCollectorPerformanceIT - Iterated over: 7104
+    public void benchmarkCandidates(BenchmarkState state, Blackhole bh) {
         final var iter = state.gc.getReferences().iterator();
         while (iter.hasNext()) {
             bh.consume(iter.next());
@@ -149,8 +158,6 @@ public class GarbageCollectorPerformanceIT {
     public void testBenchmark() throws Exception {
         // @formatter:off
         Options opt = new OptionsBuilder()
-                // Specify which benchmarks to run.
-                // You can be more specific if you'd like to run only one benchmark per test.
                 .include(this.getClass().getName() + ".*")
                 // Set the following options as needed
                 .mode(Mode.AverageTime)
