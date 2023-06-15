@@ -18,6 +18,7 @@ import org.apache.accumulo.server.ServerContext;
 import org.apache.accumulo.server.ServerOpts;
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.shaded.org.apache.http.client.utils.URIBuilder;
 import org.apache.hadoop.yarn.webapp.RemoteExceptionData;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,6 +40,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Paths;
@@ -58,9 +60,7 @@ public class GarbageCollectorPerformanceIT {
     private final static Logger log = LoggerFactory.getLogger(GarbageCollectorPerformanceIT.class);
 
     private final static String ROOT_PASSWORD = "password";
-    private final static List<String> TEST_TABLES = Arrays.asList("test1", "test2", "test3", "test4", "test5");
     private final static int RFILE_COUNT = 10000;
-
 
     @State(Scope.Benchmark)
     public static class BenchmarkState {
@@ -88,7 +88,6 @@ public class GarbageCollectorPerformanceIT {
 
             //clusterPath = tempPath.toFile();
             config = new MiniAccumuloConfig(clusterPath, ROOT_PASSWORD)
-                    .setJDWPEnabled(true)
                     .setNumTservers(3)
                     .setMemory(ServerType.TABLET_SERVER, 2, MemoryUnit.GIGABYTE);
             cluster = new MiniAccumuloCluster(config);
@@ -131,14 +130,20 @@ public class GarbageCollectorPerformanceIT {
         }
     }
 
-
     @Benchmark
     public void benchmarkCandidates(BenchmarkState state, Blackhole bh) throws Exception {
+        // TODO: currently the file counts being iterated over decrease and needs to be fixed
+        // it roughly starts at RFILE_COUNT but decreases as it's measuring:
+        // INFO dev.dtspence.accumulo.GarbageCollectorPerformanceIT - Iterated over: 9966
+        // ...
+        // INFO dev.dtspence.accumulo.GarbageCollectorPerformanceIT - Iterated over: 9075
+        // by end of iteration 3 ...
+        // INFO dev.dtspence.accumulo.GarbageCollectorPerformanceIT - Iterated over: 7104
         final var iter = state.gc.getReferences().iterator();
         while (iter.hasNext()) {
             bh.consume(iter.next());
         }
-    }   
+    }
 
     @Test
     public void testBenchmark() throws Exception {
