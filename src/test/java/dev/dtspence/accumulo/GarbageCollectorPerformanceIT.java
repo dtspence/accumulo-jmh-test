@@ -147,7 +147,7 @@ public class GarbageCollectorPerformanceIT {
     }
 
     @Benchmark
-    public void benchmarkCandidates(BenchmarkState state, Blackhole bh) {
+    public void benchmarkReferences(BenchmarkState state, Blackhole bh) {
         final var iter = state.gc.getReferences().iterator();
         while (iter.hasNext()) {
             bh.consume(iter.next());
