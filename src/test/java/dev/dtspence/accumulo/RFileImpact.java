@@ -20,18 +20,21 @@ public class RFileImpact implements InternalProfiler {
 
     @Override
     public Collection<? extends Result> afterIteration(BenchmarkParams benchmarkParams, IterationParams iterationParams, IterationResult result) {
-        final var pr = result.getPrimaryResult();
-        final var splitsRfileParam = benchmarkParams.getParam("splitsRfile");
+        if (result.getRawPrimaryResults().isEmpty()) {
+            return Collections.emptyList();
+        }
+        final Result pr = result.getPrimaryResult();
+        final String splitsRfileParam = benchmarkParams.getParam("splitsRfile");
         if (Strings.isNullOrEmpty(splitsRfileParam)) {
             return Collections.emptyList();
         }
 
-        final var splitRFileArray = splitsRfileParam.split(",");
-        final var splitCount = Long.parseLong(splitRFileArray[0]);
-        final var rfilePerSplitCount = Long.parseLong(splitRFileArray[1]);
-        final var rfileTotalNumber = splitCount * rfilePerSplitCount;
-        final var rfilePerOperation = (pr.getScore() / rfileTotalNumber);
-        final var rfileResult = new ScalarResult("rfile/op", rfilePerOperation, pr.getScoreUnit(), AggregationPolicy.AVG);
+        final String[] splitRFileArray = splitsRfileParam.split(",");
+        final long splitCount = Long.parseLong(splitRFileArray[0]);
+        final long rfilePerSplitCount = Long.parseLong(splitRFileArray[1]);
+        final long rfileTotalNumber = splitCount * rfilePerSplitCount;
+        final double rfilePerOperation = (pr.getScore() / rfileTotalNumber);
+        final ScalarResult rfileResult = new ScalarResult("rfile/op", rfilePerOperation, pr.getScoreUnit(), AggregationPolicy.AVG);
         return Collections.singletonList(rfileResult);
     }
 
