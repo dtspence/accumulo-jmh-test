@@ -1,12 +1,16 @@
 package dev.dtspence.accumulo;
 
+import com.google.common.collect.Lists;
 import org.apache.accumulo.core.client.AccumuloClient;
 import org.apache.accumulo.core.client.rfile.RFile;
 import org.apache.accumulo.core.client.security.tokens.PasswordToken;
 import org.apache.accumulo.core.conf.SiteConfiguration;
 import org.apache.accumulo.core.data.Key;
 import org.apache.accumulo.core.data.Value;
+import org.apache.accumulo.core.metadata.StoredTabletFile;
 import org.apache.accumulo.core.metadata.schema.Ample;
+import org.apache.accumulo.core.metadata.schema.TabletMetadata;
+import org.apache.accumulo.core.metadata.schema.TabletsMetadata;
 import org.apache.accumulo.gc.GCRun;
 import org.apache.accumulo.minicluster.MemoryUnit;
 import org.apache.accumulo.minicluster.ServerType;
@@ -46,6 +50,7 @@ public class GarbageCollectorPerformanceIT {
 
     private final static String ROOT_PASSWORD = "password";
     private final static String TEST_TABLE = "test";
+    private final static int TSERVER_COUNT = 3;
 
     @State(Scope.Benchmark)
     public static class BenchmarkState {
@@ -74,9 +79,8 @@ public class GarbageCollectorPerformanceIT {
             Files.createDirectories(clusterPath.toPath());
             Files.createDirectories(rfilePath.toPath());
 
-            //clusterPath = tempPath.toFile();
             config = new MiniAccumuloConfigImpl(clusterPath, ROOT_PASSWORD)
-                    .setNumTservers(3)
+                    .setNumTservers(TSERVER_COUNT)
                     .setMemory(ServerType.TABLET_SERVER, 2, MemoryUnit.GIGABYTE);
             cluster = new MiniAccumuloClusterImpl(config);
             cluster.start();
@@ -86,32 +90,40 @@ public class GarbageCollectorPerformanceIT {
 
             client = cluster.createAccumuloClient("root", new PasswordToken(ROOT_PASSWORD));
 
-            client.tableOperations().create("test");
+            client.tableOperations().create(TEST_TABLE);
 
             accumuloPropertiesFile = Paths.get(config.getDir().toString(), "conf", "accumulo.properties").toFile();
             siteConfig = SiteConfiguration.fromFile(accumuloPropertiesFile).build();
             serverContext = new ServerContext(siteConfig);
             gc = new GCRun(Ample.DataLevel.USER, serverContext);
 
+            final var tid = client.tableOperations().tableIdMap().get(TEST_TABLE);
             final var splitRfileArray = splitsRfile.split(",");
             final var splitCount = Integer.parseInt(splitRfileArray[0]);
             final var rfileCount = Integer.parseInt(splitRfileArray[1]);
             final var executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
             final var partitions = IntStream.range(0, splitCount).mapToObj(x -> "part_" + x).collect(Collectors.toList());
-            final var paths = IntStream.range(1, rfileCount).mapToObj(x -> Paths.get(rfilePath.toString(), "rfile_" + x)).collect(Collectors.toList());
+            final var paths = IntStream.range(0, rfileCount).mapToObj(x -> Paths.get(rfilePath.toString(), "rfile_" + x)).collect(Collectors.toList());
             final var splits = partitions.stream().map(Text::new).collect(Collectors.toCollection(TreeSet::new));
+            final var metadataPartitionGroups = Math.max(1, (partitions.size() / TSERVER_COUNT) + 1);
+            final var metadataSplits = (metadataPartitionGroups > 1) ?
+                    Lists.partition(partitions, metadataPartitionGroups).stream()
+                            .map(entry -> tid + ";" + entry.stream().sorted().skip(entry.size() / 2).findFirst().get())
+                            .map(Text::new)
+                            .collect(Collectors.toCollection(TreeSet::new)) :
+                    new TreeSet<Text>();
             final var rfileTotalNumber = splitCount * rfileCount;
 
             // set max files to be high
-            client.instanceOperations().setProperty("table.file.max", Integer.toString(rfileTotalNumber + 1));
+            client.instanceOperations().setProperty("table.file.max", Integer.toString(rfileTotalNumber + 2));
 
-            // TODO: set metadata split threshold
-            // currently does not function when logged out after import
-            // client.tableOperations().setProperty("accumulo.metadata", "table.split.threshold", "100K");
+            // increase migrations
+            client.instanceOperations().setProperty("tserver.migrations.concurrent.max", "100");
 
             // unsure if this is the best way to suspend compactions
             client.instanceOperations().setProperty("tserver.compaction.major.service.default.planner.opts.maxOpen", "0");
 
+            // add test table splits
             client.tableOperations().addSplits(TEST_TABLE, splits);
 
             partitions.forEach(part -> {
@@ -131,13 +143,32 @@ public class GarbageCollectorPerformanceIT {
             });
 
             executor.shutdown();
-            executor.awaitTermination(1, TimeUnit.DAYS);
+            executor.awaitTermination(3, TimeUnit.MINUTES);
 
             log.info("Importing files: {} (expected) / {} (actual)", rfileTotalNumber, Files.list(rfilePath.toPath()).count());
             client.tableOperations().importDirectory(rfilePath.toString()).to(TEST_TABLE).load();
 
-            // TODO: logout metadata splits
-            // log.info("Metadata splits size: {}", client.tableOperations().listSplits("accumulo.metadata").size());
+            log.info("Setup metadata splits");
+
+            if (!metadataSplits.isEmpty()) {
+                client.tableOperations().addSplits("accumulo.metadata", metadataSplits);
+            }
+            client.tableOperations().flush("accumulo.metadata");
+            client.instanceOperations().waitForBalance();
+
+            final var metadataSplitsActual = client.tableOperations().listSplits("accumulo.metadata");
+            final var metadataDataActual = TabletsMetadata.builder(client).forLevel(Ample.DataLevel.USER)
+                            .fetch(TabletMetadata.ColumnType.FILES)
+                            .build()
+                            .stream()
+                            .limit(5)
+                            .map(tm -> tm.getEndRow().toString() + "[" + String.join(",", tm.getFiles().stream().limit(2).map(StoredTabletFile::toString).collect(Collectors.toList())) + " ...]")
+                            .collect(Collectors.toList());
+
+            log.info("Metadata splits size: {} (computed) / {} (actual)", metadataSplits.size(), metadataSplitsActual.size());
+
+            metadataSplitsActual.forEach(entry -> log.info("md.split - " + entry));
+            metadataDataActual.forEach(entry -> log.info("md.data - " + entry));
         }
 
         @TearDown(Level.Trial)
@@ -160,7 +191,6 @@ public class GarbageCollectorPerformanceIT {
         // @formatter:off
         final var opt = new OptionsBuilder()
                 .include(this.getClass().getName() + ".*")
-                // Set the following options as needed
                 .addProfiler(RFileImpact.class)
                 .mode(Mode.AverageTime)
                 .timeUnit(TimeUnit.MILLISECONDS)
