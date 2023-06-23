@@ -20,6 +20,9 @@ public class RFileImpact implements InternalProfiler {
 
     @Override
     public Collection<? extends Result> afterIteration(BenchmarkParams benchmarkParams, IterationParams iterationParams, IterationResult result) {
+        if (result.getRawPrimaryResults().isEmpty()) {
+            return Collections.emptyList();
+        }
         final var pr = result.getPrimaryResult();
         final var splitsRfileParam = benchmarkParams.getParam("splitsRfile");
         if (Strings.isNullOrEmpty(splitsRfileParam)) {

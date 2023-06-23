@@ -66,7 +66,7 @@ public class GarbageCollectorPerformanceIT {
         ServerContext serverContext;
         GCRun gc;
 
-        @Param({"1,100","10,100","100,100"})
+        @Param({"1,100","10,100","100,100", "1000,100"})
         String splitsRfile;
 
         @Setup(Level.Trial)
@@ -117,9 +117,6 @@ public class GarbageCollectorPerformanceIT {
             // set max files to be high
             client.instanceOperations().setProperty("table.file.max", Integer.toString(rfileTotalNumber + 2));
 
-            // increase migrations
-            client.instanceOperations().setProperty("tserver.migrations.concurrent.max", "100");
-
             // unsure if this is the best way to suspend compactions
             client.instanceOperations().setProperty("tserver.compaction.major.service.default.planner.opts.maxOpen", "0");
 
@@ -148,27 +145,27 @@ public class GarbageCollectorPerformanceIT {
             log.info("Importing files: {} (expected) / {} (actual)", rfileTotalNumber, Files.list(rfilePath.toPath()).count());
             client.tableOperations().importDirectory(rfilePath.toString()).to(TEST_TABLE).load();
 
-            log.info("Setup metadata splits");
-
             if (!metadataSplits.isEmpty()) {
+                log.info("Setup metadata splits: {}", metadataSplits.size());
                 client.tableOperations().addSplits("accumulo.metadata", metadataSplits);
+
+                client.tableOperations().flush("accumulo.metadata");
+                client.instanceOperations().waitForBalance();
+
+                final var metadataSplitsActual = client.tableOperations().listSplits("accumulo.metadata");
+                final var metadataDataActual = TabletsMetadata.builder(client).forLevel(Ample.DataLevel.USER)
+                        .fetch(TabletMetadata.ColumnType.FILES)
+                        .build()
+                        .stream()
+                        .map(tm -> tm.getEndRow().toString() + "[" + String.join(",", tm.getFiles().stream().map(StoredTabletFile::toString).limit(2).collect(Collectors.toList())) + " ...]")
+                        .limit(5)
+                        .collect(Collectors.toList());
+
+                log.info("Metadata splits size: {} (computed) / {} (actual)", metadataSplits.size(), metadataSplitsActual.size());
+
+                metadataSplitsActual.forEach(entry -> log.info("md.split - " + entry));
+                metadataDataActual.forEach(entry -> log.info("md.data - " + entry));
             }
-            client.tableOperations().flush("accumulo.metadata");
-            client.instanceOperations().waitForBalance();
-
-            final var metadataSplitsActual = client.tableOperations().listSplits("accumulo.metadata");
-            final var metadataDataActual = TabletsMetadata.builder(client).forLevel(Ample.DataLevel.USER)
-                            .fetch(TabletMetadata.ColumnType.FILES)
-                            .build()
-                            .stream()
-                            .limit(5)
-                            .map(tm -> tm.getEndRow().toString() + "[" + String.join(",", tm.getFiles().stream().limit(2).map(StoredTabletFile::toString).collect(Collectors.toList())) + " ...]")
-                            .collect(Collectors.toList());
-
-            log.info("Metadata splits size: {} (computed) / {} (actual)", metadataSplits.size(), metadataSplitsActual.size());
-
-            metadataSplitsActual.forEach(entry -> log.info("md.split - " + entry));
-            metadataDataActual.forEach(entry -> log.info("md.data - " + entry));
         }
 
         @TearDown(Level.Trial)
@@ -194,8 +191,8 @@ public class GarbageCollectorPerformanceIT {
                 .addProfiler(RFileImpact.class)
                 .mode(Mode.AverageTime)
                 .timeUnit(TimeUnit.MILLISECONDS)
-                .warmupTime(TimeValue.seconds(3))
-                .warmupIterations(3)
+                .warmupTime(TimeValue.seconds(5))
+                .warmupIterations(5)
                 .measurementIterations(3)
                 .threads(1)
                 .forks(1)
