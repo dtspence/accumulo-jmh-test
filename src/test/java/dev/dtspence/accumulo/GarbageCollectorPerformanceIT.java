@@ -152,7 +152,9 @@ public class GarbageCollectorPerformanceIT {
             });
 
             executor.shutdown();
-            executor.awaitTermination(3, TimeUnit.MINUTES);
+            if (!executor.awaitTermination(30, TimeUnit.MINUTES)) {
+                throw new IllegalStateException("Timed out while waiting for files to generate");
+            }
 
             log.info("Importing files: {} (expected) / {} (actual)", rfileTotalNumber, Files.list(rfilePath.toPath()).count());
 
