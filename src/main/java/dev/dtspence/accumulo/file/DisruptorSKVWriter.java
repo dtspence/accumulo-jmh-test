@@ -16,6 +16,7 @@ import org.apache.accumulo.core.file.FileSKVWriter;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.HashSet;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -57,7 +58,7 @@ public class DisruptorSKVWriter implements FileSKVWriter {
 
     @Override
     public void append(final Key key, final Value value) {
-        Preconditions.checkNotNull(task);
+        Objects.requireNonNull(task);
         task.pushKv(key, value);
     }
 
